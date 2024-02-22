@@ -2,28 +2,30 @@ import numpy as np
 import torch.nn as nn
 from datasets import *
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 d_model = 512   # 字 Embedding 的维度
 d_ff = 2048     # 前向传播隐藏层维度
 d_k = d_v = 64  # K(=Q), V的维度
-n_layers = 6    # 有多少个encoder和decoder
+n_layers = 6    # 有多少个encoder和decode
 n_heads = 8     # Multi-Head Attention设置为8
 
 
 # 位置信息编码
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
-        super(PositionalEncoding, self).__init__()              # 调用父类的初始化函数
-        self.dropout = nn.Dropout(p=dropout)                    # 创建一个Dropout层，用于在编码过程中随机失活
+        super(PositionalEncoding, self).__init__()                  # 调用父类的初始化函数
+        self.dropout = nn.Dropout(p=dropout)                        # 创建一个Dropout层，用于在编码过程中随机失活
         pos_table = np.array([
-            [pos / np.power(10000, 2 * i / d_model) for i in range(d_model)]
-            if pos != 0 else np.zeros(d_model) for pos in range(max_len)])
+            [pos / np.power(10000, 2 * i / d_model) for i in range(d_model)]    # pos不为0时使用这个表达式
+            if pos != 0 else np.zeros(d_model) for pos in range(max_len)])      # 生成位置编码矩阵
         pos_table[1:, 0::2] = np.sin(pos_table[1:, 0::2])           # 字嵌入维度为偶数时
         pos_table[1:, 1::2] = np.cos(pos_table[1:, 1::2])           # 字嵌入维度为奇数时
-        self.pos_table = torch.FloatTensor(pos_table).cuda()        # enc_inputs: [seq_len, d_model]
+        self.pos_table = torch.FloatTensor(pos_table).to(device)    # 将numpy数组转换为Pytorch张量 enc_inputs: [seq_len, d_model]
 
     def forward(self, enc_inputs):                                  # enc_inputs: [batch_size, seq_len, d_model]
-        enc_inputs += self.pos_table[:enc_inputs.size(1), :]
-        return self.dropout(enc_inputs.cuda())
+        enc_inputs += self.pos_table[:enc_inputs.size(1), :]        # 输入矩阵与位置编码矩阵相加
+        return self.dropout(enc_inputs.to(device))                  # 经过dropout层之后输出
 
 
 def get_attn_pad_mask(seq_q, seq_k):                                # seq_q: [batch_size, seq_len] ,seq_k: [batch_size, seq_len]
@@ -48,14 +50,15 @@ class ScaledDotProductAttention(nn.Module):
                                                                         # K: [batch_size, n_heads, len_k, d_k]
                                                                         # V: [batch_size, n_heads, len_v(=len_k), d_v]
                                                                         # attn_mask: [batch_size, n_heads, seq_len, seq_len]
-        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(d_k)    # scores : [batch_size, n_heads, len_q, len_k]
-        scores.masked_fill_(attn_mask, -1e9)                            # 如果时停用词P就等于 0
+        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(d_k)    # 计算注意力值 scores : [batch_size, n_heads, len_q, len_k]
+        scores.masked_fill_(attn_mask, -1e9)                            # 屏蔽停用词：如果是停用词P就等于 0
         attn = nn.Softmax(dim=-1)(scores)
         context = torch.matmul(attn, V)                                 # [batch_size, n_heads, len_q, d_v]
         return context, attn
 
 
-class MultiHeadAttention(nn.Module):
+class MultiHeadAttention(nn.Module): 
+    # 包括MHA + ADD&LayerNorm
     def __init__(self):
         super(MultiHeadAttention, self).__init__()
         self.W_Q = nn.Linear(d_model, d_k * n_heads, bias=False)
@@ -67,19 +70,16 @@ class MultiHeadAttention(nn.Module):
                                                                 # input_K: [batch_size, len_k, d_model]
                                                                 # input_V: [batch_size, len_v(=len_k), d_model]
                                                                 # attn_mask: [batch_size, seq_len, seq_len]
-        residual, batch_size = input_Q, input_Q.size(0)
+        residual, batch_size = input_Q, input_Q.size(0)         # residual保留输入，后面与output相加做残差
         Q = self.W_Q(input_Q).view(batch_size, -1, n_heads, d_k).transpose(1, 2)    # Q: [batch_size, n_heads, len_q, d_k]
         K = self.W_K(input_K).view(batch_size, -1, n_heads, d_k).transpose(1, 2)    # K: [batch_size, n_heads, len_k, d_k]
-        V = self.W_V(input_V).view(batch_size, -1, n_heads, d_v).transpose(1,
-                                                                           2)       # V: [batch_size, n_heads, len_v(=len_k), d_v]
-        attn_mask = attn_mask.unsqueeze(1).repeat(1, n_heads, 1,
-                                                  1)                                # attn_mask : [batch_size, n_heads, seq_len, seq_len]
+        V = self.W_V(input_V).view(batch_size, -1, n_heads, d_v).transpose(1, 2)    # V: [batch_size, n_heads, len_v(=len_k), d_v]
+        attn_mask = attn_mask.unsqueeze(1).repeat(1, n_heads, 1, 1)                 # attn_mask : [batch_size, n_heads, seq_len, seq_len]
         context, attn = ScaledDotProductAttention()(Q, K, V, attn_mask)             # context: [batch_size, n_heads, len_q, d_v]
                                                                                     # attn: [batch_size, n_heads, len_q, len_k]
-        context = context.transpose(1, 2).reshape(batch_size, -1,
-                                                  n_heads * d_v)                    # context: [batch_size, len_q, n_heads * d_v]
-        output = self.fc(context)                                                   # [batch_size, len_q, d_model]
-        return nn.LayerNorm(d_model).cuda()(output + residual), attn
+        context = context.transpose(1, 2).reshape(batch_size, -1, n_heads * d_v)    # context: [batch_size, len_q, n_heads * d_v]
+        output = self.fc(context)                                                   # 通过全连接层将维度降回输出维度 [batch_size, len_q, d_model]
+        return nn.LayerNorm(d_model).to(device)(output + residual), attn
 
 
 class PoswiseFeedForwardNet(nn.Module):
@@ -93,7 +93,7 @@ class PoswiseFeedForwardNet(nn.Module):
     def forward(self, inputs):                                  # inputs: [batch_size, seq_len, d_model]
         residual = inputs
         output = self.fc(inputs)
-        return nn.LayerNorm(d_model).cuda()(output + residual)  # [batch_size, seq_len, d_model]
+        return nn.LayerNorm(d_model).to(device)(output + residual)  # [batch_size, seq_len, d_model]
 
 
 class EncoderLayer(nn.Module):
@@ -178,11 +178,11 @@ class Decoder(nn.Module):
                                                                                     # enc_intpus: [batch_size, src_len]
                                                                                     # enc_outputs: [batsh_size, src_len, d_model]
         dec_outputs = self.tgt_emb(dec_inputs)                                      # [batch_size, tgt_len, d_model]
-        dec_outputs = self.pos_emb(dec_outputs).cuda()                              # [batch_size, tgt_len, d_model]
-        dec_self_attn_pad_mask = get_attn_pad_mask(dec_inputs, dec_inputs).cuda()   # [batch_size, tgt_len, tgt_len]
-        dec_self_attn_subsequence_mask = get_attn_subsequence_mask(dec_inputs).cuda()  # [batch_size, tgt_len, tgt_len]
+        dec_outputs = self.pos_emb(dec_outputs).to(device)                              # [batch_size, tgt_len, d_model]
+        dec_self_attn_pad_mask = get_attn_pad_mask(dec_inputs, dec_inputs).to(device)   # [batch_size, tgt_len, tgt_len]
+        dec_self_attn_subsequence_mask = get_attn_subsequence_mask(dec_inputs).to(device)  # [batch_size, tgt_len, tgt_len]
         dec_self_attn_mask = torch.gt((dec_self_attn_pad_mask +
-                                       dec_self_attn_subsequence_mask), 0).cuda()   # [batch_size, tgt_len, tgt_len]
+                                       dec_self_attn_subsequence_mask), 0).to(device)   # [batch_size, tgt_len, tgt_len]
         dec_enc_attn_mask = get_attn_pad_mask(dec_inputs, enc_inputs)               # [batc_size, tgt_len, src_len]
         dec_self_attns, dec_enc_attns = [], []
         for layer in self.layers:                                                   # dec_outputs: [batch_size, tgt_len, d_model]
@@ -198,9 +198,9 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
     def __init__(self):
         super(Transformer, self).__init__()
-        self.Encoder = Encoder().cuda()
-        self.Decoder = Decoder().cuda()
-        self.projection = nn.Linear(d_model, tgt_vocab_size, bias=False).cuda()
+        self.Encoder = Encoder().to(device)
+        self.Decoder = Decoder().to(device)
+        self.projection = nn.Linear(d_model, tgt_vocab_size, bias=False).to(device)
 
     def forward(self, enc_inputs, dec_inputs):                          # enc_inputs: [batch_size, src_len]
                                                                         # dec_inputs: [batch_size, tgt_len]
