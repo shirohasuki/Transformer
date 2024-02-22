@@ -1,4 +1,3 @@
-# Starting Reference: http://nlp.seas.harvard.edu/2018/04/03/attention.html#greedy-decoding
 import torch
 import torch.utils.data as Data
 
@@ -10,9 +9,11 @@ sentences = [['我 是 学 生 P', 'S I am a student', 'I am a student E'],     
 src_vocab = {'P': 0, '我': 1, '是': 2, '学': 3, '生': 4, '喜': 5, '欢': 6, '习': 7, '男': 8}  # 词源字典  字：索引
 src_idx2word = {src_vocab[key]: key for key in src_vocab}
 src_vocab_size = len(src_vocab)  # 字典字的个数
-tgt_vocab = {'P': 0, 'S': 1, 'E': 2, 'I': 3, 'am': 4, 'a': 5, 'student': 6, 'like': 7, 'learning': 8, 'boy': 9}
-idx2word = {tgt_vocab[key]: key for key in tgt_vocab}   # 把目标字典转换成 索引：字的形式
-tgt_vocab_size = len(tgt_vocab)                         # 目标字典尺寸
+
+tgt_vocab = {'P': 0, 'S': 1, 'E': 2, 'I': 3, 'am': 4, 'a': 5, 'student': 6, 'like': 7, 'learning': 8, 'boy': 9}  # 目标字典
+tgt_idx2word = {tgt_vocab[key]: key for key in tgt_vocab}   # 把目标字典转换成 索引：字的形式
+tgt_vocab_size = len(tgt_vocab)                             # 目标字典尺寸
+
 src_len = len(sentences[0][0].split(" "))               # Encoder输入的最大长度
 tgt_len = len(sentences[0][1].split(" "))               # Decoder输入输出最大长度
 

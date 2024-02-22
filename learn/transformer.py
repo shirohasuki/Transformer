@@ -32,7 +32,7 @@ def get_attn_pad_mask(seq_q, seq_k):                                # seq_q: [ba
     batch_size, len_q = seq_q.size()
     batch_size, len_k = seq_k.size()
     pad_attn_mask = seq_k.data.eq(0).unsqueeze(1)                   # 判断 输入那些含有P(=0),用1标记 ,[batch_size, 1, len_k]
-    return pad_attn_mask.expand(batch_size, len_q, len_k)           # 扩展成多维度
+    return pad_attn_mask.expand(batch_size, len_q, len_k)           # 扩展成多维度（将一行复制为len_q行）
 
 
 def get_attn_subsequence_mask(seq):                                 # seq: [batch_size, tgt_len]
@@ -83,6 +83,7 @@ class MultiHeadAttention(nn.Module):
 
 
 class PoswiseFeedForwardNet(nn.Module):
+    # Feed Forward（FFN）前馈神经网络
     def __init__(self):
         super(PoswiseFeedForwardNet, self).__init__()
         self.fc = nn.Sequential(
@@ -90,13 +91,14 @@ class PoswiseFeedForwardNet(nn.Module):
             nn.ReLU(),
             nn.Linear(d_ff, d_model, bias=False))
 
-    def forward(self, inputs):                                  # inputs: [batch_size, seq_len, d_model]
+    def forward(self, inputs):                                  # inputs: [batch_size, seq_len, d_model] seq_len：字长度
         residual = inputs
         output = self.fc(inputs)
-        return nn.LayerNorm(d_model).to(device)(output + residual)  # [batch_size, seq_len, d_model]
+        return nn.LayerNorm(d_model).to(device)(output + residual)  # [batch_size, seq_len, d_model] ADD & LayerNorm
 
 
 class EncoderLayer(nn.Module):
+    # Encoder = MHA + FFN
     def __init__(self):
         super(EncoderLayer, self).__init__()
         self.enc_self_attn = MultiHeadAttention()                   # 多头注意力机制
@@ -104,33 +106,18 @@ class EncoderLayer(nn.Module):
 
     def forward(self, enc_inputs, enc_self_attn_mask):              # enc_inputs: [batch_size, src_len, d_model]
         # 输入3个enc_inputs分别与W_q、W_k、W_v相乘得到Q、K、V            # enc_self_attn_mask: [batch_size, src_len, src_len]
-        enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs,
+        enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs, enc_self_attn_mask)
                                                                     # enc_outputs: [batch_size, src_len, d_model],
-                                               enc_self_attn_mask)  # attn: [batch_size, n_heads, src_len, src_len]
+                                                                    # attn: [batch_size, n_heads, src_len, src_len]
         enc_outputs = self.pos_ffn(enc_outputs)                     # enc_outputs: [batch_size, src_len, d_model]
-        return enc_outputs, attn
-
-
-class EncoderLayer(nn.Module):
-    def __init__(self):
-        super(EncoderLayer, self).__init__()
-        self.enc_self_attn = MultiHeadAttention()       # 多头注意力机制
-        self.pos_ffn = PoswiseFeedForwardNet()          # 前馈神经网络
-
-    def forward(self, enc_inputs, enc_self_attn_mask):  # enc_inputs: [batch_size, src_len, d_model]
-        # 输入3个enc_inputs分别与W_q、W_k、W_v相乘得到Q、K、V             # enc_self_attn_mask: [batch_size, src_len, src_len]
-        enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs,
-                                                                        # enc_outputs: [batch_size, src_len, d_model],
-                                               enc_self_attn_mask)      # attn: [batch_size, n_heads, src_len, src_len]
-        enc_outputs = self.pos_ffn(enc_outputs)                         # enc_outputs: [batch_size, src_len, d_model]
         return enc_outputs, attn
 
 class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
-        self.src_emb = nn.Embedding(src_vocab_size, d_model)                     # 把字转换字向量
+        self.src_emb = nn.Embedding(src_vocab_size, d_model)                     # 把字转换字向量 Embedding层将字映射为字向量
         self.pos_emb = PositionalEncoding(d_model)                               # 加入位置信息
-        self.layers = nn.ModuleList([EncoderLayer() for _ in range(n_layers)])
+        self.layers = nn.ModuleList([EncoderLayer() for _ in range(n_layers)])   # n_layers 个 EncoderLayer
 
     def forward(self, enc_inputs):                                               # enc_inputs: [batch_size, src_len]
         enc_outputs = self.src_emb(enc_inputs)                                   # enc_outputs: [batch_size, src_len, d_model]
@@ -150,18 +137,16 @@ class DecoderLayer(nn.Module):
         self.dec_enc_attn = MultiHeadAttention()
         self.pos_ffn = PoswiseFeedForwardNet()
 
-    def forward(self, dec_inputs, enc_outputs, dec_self_attn_mask,
-                dec_enc_attn_mask):                                             # dec_inputs: [batch_size, tgt_len, d_model]
+    def forward(self, dec_inputs, enc_outputs, dec_self_attn_mask, dec_enc_attn_mask): 
+                                                                                # dec_inputs: [batch_size, tgt_len, d_model]
                                                                                 # enc_outputs: [batch_size, src_len, d_model]
                                                                                 # dec_self_attn_mask: [batch_size, tgt_len, tgt_len]
                                                                                 # dec_enc_attn_mask: [batch_size, tgt_len, src_len]
-        dec_outputs, dec_self_attn = self.dec_self_attn(dec_inputs, dec_inputs,
-                                                        dec_inputs,
-                                                        dec_self_attn_mask)     # dec_outputs: [batch_size, tgt_len, d_model]
+        dec_outputs, dec_self_attn = self.dec_self_attn(dec_inputs, dec_inputs, dec_inputs, dec_self_attn_mask)     # 前三个输入为 Decoder 前一级输出的 Q, K, V
+                                                                                # dec_outputs: [batch_size, tgt_len, d_model]
                                                                                 # dec_self_attn: [batch_size, n_heads, tgt_len, tgt_len]
-        dec_outputs, dec_enc_attn = self.dec_enc_attn(dec_outputs, enc_outputs,
-                                                      enc_outputs,
-                                                      dec_enc_attn_mask)        # dec_outputs: [batch_size, tgt_len, d_model]
+        dec_outputs, dec_enc_attn = self.dec_enc_attn(dec_outputs, enc_outputs, enc_outputs, dec_enc_attn_mask)     # Q是 Decoder 前一级输出的，K和 V由 Encoder 给出   
+                                                                                # dec_outputs: [batch_size, tgt_len, d_model]
                                                                                 # dec_enc_attn: [batch_size, h_heads, tgt_len, src_len]
         dec_outputs = self.pos_ffn(dec_outputs)                                 # dec_outputs: [batch_size, tgt_len, d_model]
         return dec_outputs, dec_self_attn, dec_enc_attn
@@ -177,19 +162,17 @@ class Decoder(nn.Module):
     def forward(self, dec_inputs, enc_inputs, enc_outputs):                         # dec_inputs: [batch_size, tgt_len]
                                                                                     # enc_intpus: [batch_size, src_len]
                                                                                     # enc_outputs: [batsh_size, src_len, d_model]
-        dec_outputs = self.tgt_emb(dec_inputs)                                      # [batch_size, tgt_len, d_model]
-        dec_outputs = self.pos_emb(dec_outputs).to(device)                              # [batch_size, tgt_len, d_model]
-        dec_self_attn_pad_mask = get_attn_pad_mask(dec_inputs, dec_inputs).to(device)   # [batch_size, tgt_len, tgt_len]
-        dec_self_attn_subsequence_mask = get_attn_subsequence_mask(dec_inputs).to(device)  # [batch_size, tgt_len, tgt_len]
-        dec_self_attn_mask = torch.gt((dec_self_attn_pad_mask +
-                                       dec_self_attn_subsequence_mask), 0).to(device)   # [batch_size, tgt_len, tgt_len]
+        dec_outputs = self.tgt_emb(dec_inputs)                                              # [batch_size, tgt_len, d_model]
+        dec_outputs = self.pos_emb(dec_outputs).to(device)                                  # [batch_size, tgt_len, d_model]
+        dec_self_attn_pad_mask = get_attn_pad_mask(dec_inputs, dec_inputs).to(device)       # [batch_size, tgt_len, tgt_len]
+        dec_self_attn_subsequence_mask = get_attn_subsequence_mask(dec_inputs).to(device)   # [batch_size, tgt_len, tgt_len]
+        dec_self_attn_mask = torch.gt((dec_self_attn_pad_mask + dec_self_attn_subsequence_mask), 0).to(device)   # [batch_size, tgt_len, tgt_len]
         dec_enc_attn_mask = get_attn_pad_mask(dec_inputs, enc_inputs)               # [batc_size, tgt_len, src_len]
         dec_self_attns, dec_enc_attns = [], []
         for layer in self.layers:                                                   # dec_outputs: [batch_size, tgt_len, d_model]
                                                                                     # dec_self_attn: [batch_size, n_heads, tgt_len, tgt_len]
                                                                                     # dec_enc_attn: [batch_size, h_heads, tgt_len, src_len]
-            dec_outputs, dec_self_attn, dec_enc_attn = layer(dec_outputs, enc_outputs, dec_self_attn_mask,
-                                                             dec_enc_attn_mask)
+            dec_outputs, dec_self_attn, dec_enc_attn = layer(dec_outputs, enc_outputs, dec_self_attn_mask, dec_enc_attn_mask)
             dec_self_attns.append(dec_self_attn)
             dec_enc_attns.append(dec_enc_attn)
         return dec_outputs, dec_self_attns, dec_enc_attns
@@ -200,14 +183,14 @@ class Transformer(nn.Module):
         super(Transformer, self).__init__()
         self.Encoder = Encoder().to(device)
         self.Decoder = Decoder().to(device)
-        self.projection = nn.Linear(d_model, tgt_vocab_size, bias=False).to(device)
+        self.projection = nn.Linear(d_model, tgt_vocab_size, bias=False).to(device) # 线性层
 
     def forward(self, enc_inputs, dec_inputs):                          # enc_inputs: [batch_size, src_len]
                                                                         # dec_inputs: [batch_size, tgt_len]
         enc_outputs, enc_self_attns = self.Encoder(enc_inputs)          # enc_outputs: [batch_size, src_len, d_model],
                                                                         # enc_self_attns: [n_layers, batch_size, n_heads, src_len, src_len]
-        dec_outputs, dec_self_attns, dec_enc_attns = self.Decoder(
-            dec_inputs, enc_inputs, enc_outputs)                        # dec_outpus    : [batch_size, tgt_len, d_model],
+        dec_outputs, dec_self_attns, dec_enc_attns = self.Decoder(dec_inputs, enc_inputs, enc_outputs)                        
+                                                                        # dec_outpus    : [batch_size, tgt_len, d_model],
                                                                         # dec_self_attns: [n_layers, batch_size, n_heads, tgt_len, tgt_len],
                                                                         # dec_enc_attn  : [n_layers, batch_size, tgt_len, src_len]
         dec_logits = self.projection(dec_outputs)                       # dec_logits: [batch_size, tgt_len, tgt_vocab_size]
